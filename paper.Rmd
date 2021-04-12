@@ -1,0 +1,1101 @@
+---
+title: "Identification of antigen-specific TCR sequences based on biological and statistical enrichment in unselected subjects"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+
+This is a notebook for the examination of CDR3s in the repertoire of peanut allergic individuals
+
+Load in packages and the raw data
+```{r}
+library(data.table)
+library(ggplot2)
+library(gridExtra)
+library(magrittr)
+library(dplyr)
+library(alakazam)
+library(igraph)
+library(scales)
+library(ComplexHeatmap)
+library(OmicsMarkeR)
+library(circlize)
+
+switch(Sys.info()[['user']],
+       nealp = {file.path <- "C:/Users/nealp/Documents/Dropbox (Partners HealthCare)/Manuscripts/neal_PNOIT_TCR"
+       raw.file.path <- "C:/Users/nealp/Documents/Dropbox (Partners HealthCare)/Projects/PNOIT2-1037/TCRB sequencing and HLA typing data"},
+        stop("I don't recognize your username, type Sys.info() to find out what it is.")
+)
+source("neals_tcr_functions.R")
+
+# Load in the raw data
+load(paste(raw.file.path, "neals.thesis.data", "parsed.data.baseline.rda", sep = "/"))
+load(paste(raw.file.path, "neals.thesis.data", "enriched.CDR3s.rda", sep = "/"))
+load(paste(raw.file.path, "neals.thesis.data", "top.disc.fourmers.rda", sep = "/")) # discontinuous 4mers
+load(paste(raw.file.path, "neals.thesis.data", "top.disc.fivemers.rda", sep = "/")) # discontinuous 5mers
+load(paste(raw.file.path, "neals.thesis.data", "top.nmers.rda", sep = "/")) # continuous 3, 4, and 5 mers (list)
+load(paste(raw.file.path, "neals.thesis.data", "node.pairs.rda", sep = "/"))
+
+
+# Make a dataframe for the enriched CDR3s
+enriched.CDR3.df <- do.call(rbind, enriched.CDR3s)
+
+```
+
+```{r}
+pscdr3_freq_df <- read.csv(paste(raw.file.path, "neals.thesis.data/psCDR3_CD154_frequencies.csv", sep = "/"), row.names = 1)
+
+pscdr3_freq_df$pscdr3_per_mil_cd4 <- pscdr3_freq_df$psCDR3_count / pscdr3_freq_df$million_CD4
+pscdr3_freq_df$cd154_unstim_per_mil_cd4 <- pscdr3_freq_df$CD154_Unstim / pscdr3_freq_df$million_CD4
+pscdr3_freq_df$cd154_gpe_per_mil_cd4 <- pscdr3_freq_df$CD154_GPE / pscdr3_freq_df$million_CD4
+
+unstim_gpe_comp <- select(pscdr3_freq_df, c("cd154_unstim_per_mil_cd4", "cd154_gpe_per_mil_cd4"))%>%
+  melt()
+
+ggplot(unstim_gpe_comp, aes(x = variable, y = value)) + geom_boxplot() +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x)),
+              limits = c(10, 80000)) +
+  scale_x_discrete(labels=c("Unstimulated", "Peanut stimulated")) +
+  ylab("CD154+ cells per million CD4+") +
+  theme_bw(base_size = 20) +
+   theme(axis.text.x = element_text(face="bold"),
+         axis.text.y = element_text(face="bold"))
+
+ggplot(pscdr3_freq_df, aes(y = pscdr3_per_mil_cd4)) + geom_boxplot() +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x),
+              labels = trans_format("log10", math_format(10^.x))) +
+  scale_x_discrete(labels = c("Peanut")) +
+  theme_bw(base_size = 20)
+
+```
+
+First we wanted to look at overall sequences in our dataset.  
+```{r}
+# Create a dataframe with general information
+info.df <- data.frame(id = names(enriched.CDR3s),
+                resting.CDR3nuc = unlist(lapply(data.parse[grep("neg", names(data.parse))], nrow)),
+                resting.CDR3AA = unlist(lapply(data.parse[grep("neg", names(data.parse))], function(x){
+                  length(unique(x$CDR3.amino.acid.sequence))})),
+                activated.CDR3nuc = unlist(lapply(data.parse[grep("pos", names(data.parse))], nrow)),
+                activated.CDR3AA = unlist(lapply(data.parse[grep("pos", names(data.parse))], function(x){
+                  length(unique(x$CDR3.amino.acid.sequence))
+                })),
+                psCDR3nuc = unlist(lapply(grep("pos", names(data.parse), value = TRUE), function(x){
+                  nrow(data.parse[[x]][data.parse[[x]]$CDR3.amino.acid.sequence %in% 
+                                         enriched.CDR3s[[gsub("([0-9]+).*$", "\\1", x)]]$CDR3.amino.acid.sequence,])
+                })),
+                psCDR3AA = unlist(lapply(enriched.CDR3s, nrow))
+                )
+info.df$psCDR3nuc.perc.act <- (info.df$psCDR3nuc / info.df$activated.CDR3nuc) * 100
+info.df$psCDR3AA.perc.act <- (info.df$psCDR3AA / info.df$activated.CDR3AA) * 100
+
+plot.df <- melt(info.df, id.vars = "id")
+
+plt.1 <- ggplot(plot.df[grep("resting", plot.df$variable),], aes(x = variable, y = value)) +
+  geom_boxplot() +
+  ylab("sequences") + xlab("") +
+  scale_x_discrete(labels = c("CDR3 nucleotide sequences", "CDR3 AA sequences")) +
+  ggtitle("Resting CDR3s") +
+  theme_bw()
+plt.2 <- ggplot(plot.df[grep("activated", plot.df$variable),], aes(x = variable, y = value)) +
+  geom_boxplot() +
+  ylab("sequences") + xlab("") +
+  scale_x_discrete(labels = c("CDR3 nucleotide sequences", "CDR3 AA sequences")) +
+  ggtitle("activated CDR3s") +
+  theme_bw()
+grid.arrange(plt.1, plt.2, ncol = 2)
+
+ggplot(plot.df[plot.df$variable == "psCDR3nuc" | plot.df$variable == "psCDR3AA",], aes(x = variable, y = value)) + geom_boxplot() +
+  ylab("sequences") + xlab("") +
+  scale_x_discrete(labels = c("CDR3 nucleotide sequences", "CDR3 AA sequences")) +
+  ggtitle("psCDR3s") +
+  theme_bw(base_size = 15)
+ggplot(plot.df[grep("perc.act", plot.df$variable),], aes(x = variable, y = value)) + geom_boxplot() +
+  ylab("percent of activated CDR3s") + xlab("") +
+  scale_x_discrete(labels = c("CDR3 nucleotide sequences", "CDR3 AA sequences")) +
+  ggtitle("percent of activated CDR3s that are psCDR3s") +
+  theme_bw(base_size = 20)
+
+```
+
+Here we can see that our statistical enrichment selects only ~15% of the total activated compartment, indicating the stringency with which it selects sequences
+
+
+```{r hamming}
+# Perform hamming on entire list of peanut CDR3s
+min.ham <- CDR3_dist(enriched.CDR3.df$CDR3.amino.acid.sequence, method = "hamming")
+min.lev <- CDR3_dist(enriched.CDR3.df$CDR3.amino.acid.sequence, method = "lv")
+# Create a list of all of the CDR3s from CD154- to be used as a control
+rest.CDR3s <- lapply(data.parse[grep("neg",names(data.parse))], function(x){
+  x <- unique(x$CDR3.amino.acid.sequence)
+}) %>% unlist(., use.names = FALSE)
+
+# Get hamming distance on all CD154+ and CD154-
+neg.ham.df <- data.frame(distance = 0:20)
+neg.lev.df <- data.frame(distance = 0:20)
+
+for(i in 1:50){
+  sample <- sample(rest.CDR3s, nrow(enriched.CDR3.df))
+  neg.ham <- CDR3_dist(sample, "hamming")
+  neg.lev <- CDR3_dist(sample, "lv")
+  
+  neg.ham.df <- left_join(neg.ham.df, neg.ham, by = "distance", all = TRUE)
+  neg.lev.df <- left_join(neg.lev.df, neg.lev, by = "distance", all = TRUE)
+}
+
+# Clean up negative dataframes, add median percent and standard deviation
+neg.ham.df[is.na(neg.ham.df)] <- 0
+neg.ham.df$median <- apply(neg.ham.df[2:ncol(neg.ham.df)], 1, median)
+neg.ham.df$sd <- apply(neg.ham.df[2:ncol(neg.ham.df)], 1, sd)
+
+# Clean up negative dataframes, add median percent and standard deviation
+neg.lev.df[is.na(neg.lev.df)] <- 0
+neg.lev.df$median <- apply(neg.lev.df[2:ncol(neg.lev.df)], 1, median)
+neg.lev.df$sd <- apply(neg.lev.df[2:ncol(neg.lev.df)], 1, sd)
+
+# Create a list of all of the CDR3s from CD154- to be used as a control
+act.CDR3s <- lapply(data.parse[grep("pos",names(data.parse))], function(x){
+  x <- unique(x$CDR3.amino.acid.sequence)
+}) %>% unlist(., use.names = FALSE)
+
+
+# Do the same for all CD154+
+pos.all.ham.df <- data.frame(distance = 0:20)
+pos.all.lev.df <- data.frame(distance = 0:20)
+for(i in 1:50){
+  sample = sample(act.CDR3s, nrow(enriched.CDR3.df))
+  pos.all.ham <- CDR3_dist(sample, method = "hamming")
+  pos.all.lev <- CDR3_dist(sample, method = "lv")
+  
+  pos.all.ham.df <- left_join(pos.all.ham.df, pos.all.ham, by = "distance", all = TRUE) 
+  pos.all.lev.df <- left_join(pos.all.lev.df, pos.all.lev, by = "distance", all = TRUE)
+}
+
+# Clean up negative dataframe, add median percent and standard deviation
+pos.all.ham.df[is.na(pos.all.ham.df)] <- 0
+pos.all.ham.df$median <- apply(pos.all.ham.df[2:ncol(pos.all.ham.df)], 1, median)
+pos.all.ham.df$sd <- apply(pos.all.ham.df[2:ncol(pos.all.ham.df)], 1, sd)
+
+# Clean up negative dataframe, add median percent and standard deviation
+pos.all.lev.df[is.na(pos.all.lev.df)] <- 0
+pos.all.lev.df$median <- apply(pos.all.lev.df[2:ncol(pos.all.lev.df)], 1, median)
+pos.all.lev.df$sd <- apply(pos.all.lev.df[2:ncol(pos.all.lev.df)], 1, sd)
+
+
+sd.ham <- neg.ham.df$sd[as.numeric(as.character(neg.ham.df$distance)) <=15] %>%
+  append(pos.all.ham.df$sd[as.numeric(as.character(pos.all.ham.df$distance)) <=15]) %>%
+  append(rep(NA, 16))
+
+sd.lev <- neg.lev.df$sd[as.numeric(as.character(neg.lev.df$distance)) <=15] %>%
+  append(pos.all.lev.df$sd[as.numeric(as.character(pos.all.lev.df$distance)) <=15]) %>%
+  append(rep(NA, 16))
+
+min.ham <- full_join(min.ham, neg.ham.df, by = "distance") %>%
+  select(c(1, 2, ncol(.) - 1)) %>%
+  full_join(., pos.all.ham.df, by = "distance") %>%
+  select(c(1,3, ncol(.) - 1, 2))
+colnames(min.ham) <- c("distance", "CD154-", "CD154+", "enriched.CD154+")
+
+min.lev <- full_join(min.lev, neg.lev.df, by = "distance") %>%
+  select(c(1, 2, ncol(.) - 1)) %>%
+  full_join(., pos.all.lev.df, by = "distance") %>%
+  select(c(1,3, ncol(.) - 1, 2))
+colnames(min.lev) <- c("distance", "CD154-", "CD154+", "enriched.CD154+")
+
+
+min.ham[is.na(min.ham)] <- 0
+min.ham <- min.ham[!min.ham$distance == "Inf",]
+min.ham <- min.ham[order(min.ham$distance),]
+
+min.ham.melt <- melt(min.ham, id.vars = "distance")
+min.ham.melt$distance <- as.integer(min.ham.melt$distance)
+min.ham.melt <- min.ham.melt[min.ham.melt$distance <=15,] %>%
+  cbind(., sd.ham)
+min.ham.melt$metric <- "hamming"
+colnames(min.ham.melt)[colnames(min.ham.melt) == "sd.ham"] <- "sd"
+min.lev[is.na(min.lev)] <- 0
+min.lev <- min.lev[!min.lev$distance == "Inf",]
+min.lev <- min.lev[order(min.lev$distance),]
+
+min.lev.melt <- melt(min.lev, id.vars = "distance")
+min.lev.melt$distance <- as.integer(min.lev.melt$distance)
+min.lev.melt <- min.lev.melt[min.lev.melt$distance <=15,] %>%
+  cbind(., sd.lev)
+min.lev.melt$metric <- "levenshtein"
+colnames(min.lev.melt)[colnames(min.lev.melt) == "sd.lev"] <- "sd"
+
+plot.df <- rbind(min.ham.melt, min.lev.melt)
+
+ggplot(plot.df, aes(x = distance, y = value, fill = variable, width = .80)) +
+  facet_wrap(~metric) +
+  geom_bar(stat = "identity", position = position_dodge()) + scale_x_continuous(breaks = c(0:15)) +
+  scale_fill_manual(values = c("#006ddb", "#24ff24", "#920000"), labels = c("CD154- T cells", "All CD154+ T cells",
+                                                                            "Peanut Enriched CD154+ cells")) +
+  geom_errorbar(aes(ymin = value, ymax = sd + value), width = .3, position = position_dodge(0.8)) +
+  ylab("percent of total clones") + xlab("AA differences to next closest CDR3") +
+  ggtitle("Hamming distance for peanut CDR3s") +
+  theme_bw()
+
+ggplot(min.ham.melt[min.ham.melt$distance <= 8,], aes(x = distance, y = value, fill = variable, width = .80)) +
+  geom_bar(stat = "identity", position = position_dodge()) + scale_x_continuous(breaks = c(0:15)) +
+  scale_fill_manual(values = c("#4E79A7", "#999999", "#920000"), labels = c("CD154- T cells", "All CD154+ T cells",
+                                                                            "Peanut Enriched CD154+ cells")) +
+  geom_errorbar(aes(ymin = value, ymax = sd + value), width = .3, position = position_dodge(0.8), na.rm = TRUE) +
+  ylab("percent of total clones") + xlab("AA differences to next closest CDR3") +
+  ggtitle("Hamming distance for peanut CDR3s") +
+  theme_bw()
+
+ggplot(min.lev.melt[min.lev.melt$distance <= 8,], aes(x = distance, y = value, fill = variable, width = .80)) +
+  geom_bar(stat = "identity", position = position_dodge()) + scale_x_continuous(breaks = c(0:15)) +
+  scale_fill_manual(values = c("#4E79A7", "#999999", "#920000"), labels = c("CD154- T cells", "All CD154+ T cells",
+                                                                            "Peanut Enriched CD154+ cells")) +
+  geom_errorbar(aes(ymin = value, ymax = sd + value), width = .3, position = position_dodge(0.8), na.rm = TRUE) +
+  ylab("percent of total clones") + xlab("AA differences to next closest CDR3") +
+  ggtitle("levenshtein distance for peanut CDR3s") +
+  theme_bw()
+```
+
+```{r diversity}
+
+
+pscdr3_all_seqs <- apply(enriched.CDR3.df, 1, function(x){
+  unlist(rep(x["CDR3.amino.acid.sequence"], as.numeric(x["activated.count"])), use.names = FALSE)}) %>%
+  unlist(., use.names = FALSE)
+
+pscdr3_all_ids <- apply(enriched.CDR3.df, 1, function(x){
+  unlist(rep(x["id"], as.numeric(x["activated.count"])), use.names = FALSE)}) %>%
+  unlist(., use.names = FALSE)
+
+diversity.df <- data.frame(CDR3.amino.acid.sequence = pscdr3_all_seqs,
+                           group = pscdr3_all_ids)
+ids <- unique(enriched.CDR3.df$id)
+
+
+# Make a dataframe for each subject ID
+all.data.by.id <- lapply(ids, function(x){
+  # Get the enriched df
+  enriched.df<- enriched.CDR3s[[x]] %>%
+    select(., CDR3.amino.acid.sequence, activated.count) %>%
+    `colnames<-`(c("CDR3.amino.acid.sequence", "Read.count"))
+  enriched.df$group <- "psCDR3"
+  # Get all CD154+ data
+  all.pos.df <- data.parse[[paste(x, "pos", sep = "_")]] %>%
+    select(., CDR3.amino.acid.sequence, Read.count)
+  all.pos.df$group <- "all_CD154+"
+  # Get all the CD154- data
+  neg.df <- data.parse[[paste(x, "neg", sep = "_")]] %>%
+    select(., CDR3.amino.acid.sequence, Read.count)
+  neg.df$group <- "CD154-"
+  
+  all.df <- do.call(rbind, list(enriched.df, all.pos.df, neg.df))
+  return(all.df)
+  
+}) %>% `names<-`(ids)
+
+# Calculate diversity for each subject
+diversity <- lapply(all.data.by.id, function(x){
+  # tbl_x = tbl_df(x)
+  colnames(x)[colnames(x) == "CDR3.amino.acid.sequence"] <- "CLONE"
+  div <- alphaDiversity(x, group = "group", 
+                        copy = "Read.count")
+})
+
+
+div.sig <- lapply(all.data.by.id, function(x){
+  sig.tests <- list()
+  colnames(x)[colnames(x) == "CDR3.amino.acid.sequence"] <- "CLONE"
+  # Iterate all values of q
+  for( i in 0:2){
+    test <- testDiversity(x, group = "group",
+                          copy = "Read.count", q = i)
+    p.vals <- test@tests
+    p.vals$q <- i
+    sig.tests[[as.character(i)]] <- p.vals
+  }
+  sig.tests <- do.call(rbind, sig.tests)
+  
+  return(sig.tests)
+}) %>% do.call(rbind, .)
+
+div.sig
+
+plot_cols = c("#999999", "#4E79A7", "#920000")
+for(i in 1:length(diversity)){
+  print(plot(diversity[[i]], 
+       legend_title="Sample", colors = plot_cols, main_title = paste("diversity:", names(diversity[i]))))
+  
+}
+
+```
+
+```{r div_curves}
+for(i in 1:length(diversity)){
+  plot(diversity[[i]], 
+       legend_title="Sample", main_title = paste("diversity:", names(diversity[i])))
+  
+}
+
+```
+
+```{r div_fc}
+### NEED TO FIX THIS ###
+# Look at fold-change in diversity from CD154-:CD154+, CD154-:psCDR3, CD154+:psCDR3
+div.fc <- lapply(all.data.by.id, function(x){
+  fold.changes <- list()
+  # Iterate all values of q
+  for( i in 0:2){
+    test <- testDiversity(x, group = "group", clone = "CDR3.amino.acid.sequence",
+                          copy = "Read.count", q = i)
+    df <- data.frame(comp = c("psCDR3toCD154neg", "psCDR3toCD154pos", "CD154negtoCD154pos"),
+                     fold.change = c(test@summary["CD154-",]$MEAN / test@summary["psCDR3",]$MEAN,
+                                     test@summary["all_CD154+",]$MEAN / test@summary["psCDR3",]$MEAN,
+                                     test@summary["CD154-",]$MEAN / test@summary["all_CD154+",]$MEAN))
+    df$q <- i
+    fold.changes[[as.character(i)]] <- df
+  }
+  fold.changes <- do.call(rbind, fold.changes)
+  
+  return(fold.changes)
+}) %>% do.call(rbind, .)
+div.fc$comp <- factor(div.fc$comp, levels = c("psCDR3toCD154neg", "psCDR3toCD154pos", "CD154negtoCD154pos"))
+ggplot(div.fc, aes(x = comp, y = fold.change)) + geom_boxplot() +
+  scale_y_continuous(limits = c(0, 8)) +
+  facet_wrap(~q, scales = "free_y") +
+  ylab("Fold change") + xlab("") +
+  scale_x_discrete(labels = c("CD154-:psCDR3", "CD154+:psCDR3", "CD154-:CD154+")) +
+  ggtitle("fold change of diversity at different indeces") +
+  theme_bw(base_size = 20) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5))
+```
+
+```{r network control}
+### Look at code on rstudio.partners.org ###
+# Function to find CDR3s that are within 1 AA difference (lev. distance)
+find_pairs_hom <- function(x, y) {
+  res <- dist.to.df(as.dist(stringdistmatrix(x, y,
+                                             method = "lv",
+                                             useNames = "strings"))) %>%
+    filter(dist == 1) %>%
+    select(-dist)
+  colnames(res) <- c("from.cdr3", "to.cdr3")
+  res
+}
+neg.data <- data.parse[grep("neg", names(data.parse))] %>%
+  do.call(rbind, .) %>%
+  select(., CDR3.nucleotide.sequence, CDR3.amino.acid.sequence, Read.count) %>%
+  apply(., 1, function(y){
+  y <- do.call(rbind, replicate(y[["Read.count"]], y, simplify = FALSE))
+}) %>% do.call(rbind, .) %>% as.data.frame(.)
+
+# # TEST: Make sure this is the correct sized dataframe
+# nrow(neg.data) == sum(unlist(lapply(data.parse[grep("neg", names(data.parse))], function(x) sum(x$Read.count))))
+
+# Get just positive data
+pos.data <- data.parse[grep("pos", names(data.parse))] %>%
+  do.call(rbind, .) %>%
+  select(., CDR3.nucleotide.sequence, CDR3.amino.acid.sequence, Read.count) %>%
+  apply(., 1, function(y){
+    y <- do.call(rbind, replicate(y[["Read.count"]], y, simplify = FALSE))
+  }) %>% do.call(rbind, .) %>% as.data.frame(.)
+
+# Look in random CD154- CDR3s
+n_iter = 2
+neg.edges.vec <- vector(mode = "numeric", length = n_iter) 
+for(i in 1:n_iter){
+  # Get random CDR3s
+  indx <- sample.int(nrow(neg.data) ,size = length(enriched.CDR3.df$CDR3.amino.acid.sequence))
+  random.CDR3s <-  neg.data[indx,]
+  
+  # Change from factors to character vectors (should change this earlier on)
+  random.CDR3s$CDR3.nucleotide.sequence <- as.character(random.CDR3s$CDR3.nucleotide.sequence)
+  random.CDR3s$CDR3.amino.acid.sequence <- as.character(random.CDR3s$CDR3.amino.acid.sequence)
+  # Determine the number of pairs from homology
+  pairs.lev.ctrl <- find_pairs_hom(random.CDR3s$CDR3.amino.acid.sequence, random.CDR3s$CDR3.amino.acid.sequence)
+  
+  ### Determine the number of pairs from nmers ###
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched discontinuous 4mers in CD154- CDR3s
+  pairs.disc.4mer.ctrl <- foreach(j = 1:length(top.disc.fourmers$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R")
+    data = find_pairs_disc(top.disc.fourmers$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence", motif.size = 4)
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched discontinuous 5mers in CD154- CDR3s
+  pairs.disc.5mer.ctrl <- foreach(j = 1:length(top.disc.fivemers$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R")
+    data = find_pairs_disc(top.disc.fivemers$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence", motif.size = 5)
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched 3mers in CD154- CDR3s
+  pairs.threemers.ctrl <- foreach(j = 1:length(top.nmers$threemer$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R") 
+    data = find_pairs_cont(top.nmers$threemer$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence")
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched 4mers in CD154- CDR3s
+  pairs.fourmers.ctrl <- foreach(j = 1:length(top.nmers$fourmer$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R") 
+    data = find_pairs_cont(top.nmers$fourmer$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence")
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched 5mers in CD154- CDR3s
+  pairs.fivemers.ctrl <- foreach(j = 1:length(top.nmers$fivemer$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R") 
+    data = find_pairs_cont(top.nmers$fivemer$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence")
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Add all of the pairs
+  pairs.ctrl <- rbind(pairs.lev.ctrl, pairs.disc.4mer.ctrl, pairs.disc.5mer.ctrl, pairs.threemers.ctrl,
+                      pairs.fourmers.ctrl, pairs.fivemers.ctrl)
+  
+  # Make the columns character vectors
+  pairs.ctrl$from.cdr3 <- as.character(pairs.ctrl$from.cdr3)
+  pairs.ctrl$to.cdr3 <- as.character(pairs.ctrl$to.cdr3)
+  
+  # Alphabetically order the pairs (make it easier to eliminate duplicates)
+  for(k in 1:nrow(pairs.ctrl)){
+    pairs.ctrl[k,] <- sort(pairs.ctrl[k,])
+  }
+  
+  # Limit to unique edges
+  pairs.ctrl <- unique(pairs.ctrl)
+  
+  # Get rid of any self-edges
+  pairs.ctrl <- pairs.ctrl[!pairs.ctrl$from.cdr3 == pairs.ctrl$to.cdr3,]
+  
+  # Create self-edges for CDR3s with multiple nucleotide sequences in enriched
+  # Get all CDR3s in the network
+  net.CDR3s.ctrl <- unique(c(pairs.ctrl$from.cdr3, pairs.ctrl$to.cdr3))
+  
+  # Create a new self edge for every unique nucleotide sequence for the random CDR3s
+  self.edges.ctrl <- lapply(net.CDR3s.ctrl, function(x){
+    info <- random.CDR3s[random.CDR3s$CDR3.amino.acid.sequence == x,]
+    nucleotide.count <- length(unique(info$CDR3.nucleotide.sequence))
+    df <- data.frame("from.cdr3" = rep(x, nucleotide.count - 1),
+                     "to.cdr3" = rep(x, nucleotide.count - 1))
+    
+    return(df)
+  }) %>% do.call(rbind, .)
+  
+  pairs.ctrl <- rbind(pairs.ctrl, self.edges.ctrl)
+  
+  # Add the number of edges from the control CDR3s to a vector
+  neg.edges.vec[i] <- nrow(pairs.ctrl)
+}
+
+# Look in random CD154+ CDR3s
+pos.edges.vec <- vector(mode = "numeric", length = n_iter) 
+
+for(i in 1:n_iter){
+  # Get random CDR3s
+  indx <- sample.int(nrow(pos.data) ,size = length(enriched.CDR3.df$CDR3.amino.acid.sequence))
+  random.CDR3s <-  pos.data[indx,]
+  
+  # Change from factors to character vectors (should change this earlier on)
+  random.CDR3s$CDR3.nucleotide.sequence <- as.character(random.CDR3s$CDR3.nucleotide.sequence)
+  random.CDR3s$CDR3.amino.acid.sequence <- as.character(random.CDR3s$CDR3.amino.acid.sequence)
+  # Determine the number of pairs from homology
+  pairs.lev.ctrl <- find_pairs_hom(random.CDR3s$CDR3.amino.acid.sequence, random.CDR3s$CDR3.amino.acid.sequence)
+  
+  ### Determine the number of pairs from nmers ###
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched discontinuous 4mers in CD154- CDR3s
+  pairs.disc.4mer.ctrl <- foreach(j = 1:length(top.disc.fourmers$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R")
+    data = find_pairs_disc(top.disc.fourmers$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence", motif.size = 4)
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched discontinuous 5mers in CD154- CDR3s
+  pairs.disc.5mer.ctrl <- foreach(j = 1:length(top.disc.fivemers$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R")
+    data = find_pairs_disc(top.disc.fivemers$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence", motif.size = 5)
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched 3mers in CD154- CDR3s
+  pairs.threemers.ctrl <- foreach(j = 1:length(top.nmers$threemer$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R") 
+    data = find_pairs_cont(top.nmers$threemer$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence")
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched 4mers in CD154- CDR3s
+  pairs.fourmers.ctrl <- foreach(j = 1:length(top.nmers$fourmer$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R") 
+    data = find_pairs_cont(top.nmers$fourmer$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence")
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Set cores for parallel processing
+  cores <- detectCores()
+  cl <- makeCluster(cores[1]-1)
+  registerDoParallel(cl)
+  
+  # Look for enriched 5mers in CD154- CDR3s
+  pairs.fivemers.ctrl <- foreach(j = 1:length(top.nmers$fivemer$nmer), .combine = rbind) %dopar% {
+    source("neals_tcr_functions.R") 
+    data = find_pairs_cont(top.nmers$fivemer$nmer[j], random.CDR3s,
+                           CDR3.col = "CDR3.amino.acid.sequence")
+    data
+  }
+  stopCluster(cl)
+  remove(cores); remove(cl)
+  
+  # Add all of the pairs
+  pairs.ctrl <- rbind(pairs.lev.ctrl, pairs.disc.4mer.ctrl, pairs.disc.5mer.ctrl, pairs.threemers.ctrl,
+                      pairs.fourmers.ctrl, pairs.fivemers.ctrl)
+  
+  # Limit to unique edges
+  pairs.ctrl <- unique(pairs.ctrl)
+  # Make the columns character vectors
+  pairs.ctrl$from.cdr3 <- as.character(pairs.ctrl$from.cdr3)
+  pairs.ctrl$to.cdr3 <- as.character(pairs.ctrl$to.cdr3)
+  
+  # Alphabetically order the pairs (make it easier to eliminate duplicates)
+  for(k in 1:nrow(pairs.ctrl)){
+    pairs.ctrl[k,] <- sort(pairs.ctrl[k,])
+  }
+  
+  # Limit to unique edges
+  pairs.ctrl <- unique(pairs.ctrl)
+  
+  # Get rid of any self-edges
+  pairs.ctrl <- pairs.ctrl[!pairs.ctrl$from.cdr3 == pairs.ctrl$to.cdr3,]
+  
+  # Create self-edges for CDR3s with multiple nucleotide sequences in enriched
+  # Get all CDR3s in the network
+  net.CDR3s.ctrl <- unique(c(pairs.ctrl$from.cdr3, pairs.ctrl$to.cdr3))
+  
+  # Create a new self edge for every unique nucleotide sequence for the random CDR3s
+  self.edges.ctrl <- lapply(net.CDR3s.ctrl, function(x){
+    info <- random.CDR3s[random.CDR3s$CDR3.amino.acid.sequence == x,]
+    nucleotide.count <- length(unique(info$CDR3.nucleotide.sequence))
+    df <- data.frame("from.cdr3" = rep(x, nucleotide.count - 1),
+                     "to.cdr3" = rep(x, nucleotide.count - 1))
+    
+    return(df)
+  }) %>% do.call(rbind, .)
+  
+  pairs.ctrl <- rbind(pairs.ctrl, self.edges.ctrl)
+  
+  # Add the number of edges from the control CDR3s to a vector
+  pos.edges.vec[i] <- nrow(pairs.ctrl)
+
+}
+
+# Create a dataframe to plot 
+plot.df <- data.frame(variable = c("ps-CDR3s", "activated", "resting"), 
+                      edges = c(nrow(pairs),median(pos.edges.vec),  median(neg.edges.vec)),
+                      sd = c(0, sd(pos.edges.vec), sd(neg.edges.vec)))
+plot.df$variable <- factor(plot.df$variable, levels = plot.df$variable)
+
+ggplot(plot.df, aes(x = variable, y = edges)) + geom_bar(stat = "identity") +
+  geom_errorbar(data = plot.df[plot.df$sd > 0,], aes(ymin = edges - sd, 
+                                                     ymax = edges + sd), width = 0.2) +
+  ggtitle("Edges in psCDR3s vs. randomly sampled CDR3s") +
+  scale_y_continuous(limits = c(0, 2100)) +
+  xlab("") + 
+  theme_bw()
+
+
+```
+
+```{R pub_vs_priv_germline}
+pub.CDR3s <- unique(enriched.CDR3.df$CDR3.amino.acid.sequence[duplicated(enriched.CDR3.df$CDR3.amino.acid.sequence)])
+pos.parse <- data.parse[grep("pos", names(data.parse))]
+names(pos.parse) <- substr(names(pos.parse), 0, nchar(names(pos.parse)) - 4)
+
+
+for(i in 1:length(pos.parse)){
+  pos.parse[[i]] <- pos.parse[[i]][pos.parse[[i]]$CDR3.amino.acid.sequence %in%
+                                     enriched.CDR3s[[i]]$CDR3.amino.acid.sequence,]
+}
+pos.parse <- do.call(rbind, pos.parse)
+
+pos.parse$total_insertions <- pos.parse$VD.insertions + pos.parse$DJ.insertions
+
+pos.parse$pubpriv <-unlist(lapply(pos.parse$CDR3.amino.acid.sequence, function(seq) ifelse(seq %in% pub.CDR3s, "public", "private")))
+
+names <- colnames(pos.parse)[grep("insert", colnames(pos.parse))]
+
+for (insert in names){
+  print(insert)
+  print(ggplot(pos.parse, aes(x = pubpriv, y = pos.parse[[insert]], fill = pubpriv)) + geom_boxplot() +
+    scale_fill_manual(values = c("#0000FF", "#FF0000")) +
+      scale_y_continuous(limits = c(0, 40)) +
+    ggtitle(paste("distribution of insertions:", insert, sep = " ")) +
+    theme_bw())
+  
+}
+
+# Want to make the same plot but facetted
+plot_df <- select(pos.parse,total_insertions, VD.insertions, DJ.insertions, pubpriv)
+plot_df <- melt(plot_df)
+levels(plot_df$variable) <- c("Total insertions", "V-D insertions", "D-J insertions")
+
+ggplot(plot_df, aes(x = pubpriv, y = value, fill = pubpriv)) + geom_boxplot() +
+  scale_fill_manual(values = c("#0000FF", "#FF0000")) +
+  facet_wrap(~variable) +
+      scale_y_continuous(limits = c(0, 40)) +
+  ggtitle("distribution of insertions") +
+  xlab("") +
+  ylab("number of insertions") +
+  theme_bw() +
+  theme(strip.text.x = element_text(size = 12, face = "bold"),
+        legend.position = "none")
+```
+
+```{r pub_vs_priv_rearrangements}
+# Determine the number of rearrangements for each public psCDR3
+pub.rearrangement.count <- lapply(pub.CDR3s, function(x){
+  df <- pos.parse[pos.parse$CDR3.amino.acid.sequence == x,]
+  
+  num.rearrangements <- length(unique(df$CDR3.nucleotide.sequence))
+  return(num.rearrangements)
+})
+
+# Put data into dataframe
+pub.rearrangement.df <- data.frame(CDR3 = pub.CDR3s,
+                                   num.rearrangements = unlist(pub.rearrangement.count))
+pub.rearrangement.df$set <- "public"
+
+# Compare the public to the private
+# Get private CDR3s
+priv.CDR3s <- enriched.CDR3.df$CDR3.amino.acid.sequence[!enriched.CDR3.df$CDR3.amino.acid.sequence %in% pub.CDR3s]
+
+# #TEST: Make sure all CDR3s are accounted for 
+# length(priv.CDR3s) + length(pub.CDR3s) == length(unique(enriched.CDR3s.df$CDR3.amino.acid.sequence))
+
+# Determine the number of rearrangements for each private psCDR3
+priv.rearrangement.count <- lapply(priv.CDR3s, function(x){
+  df <- pos.parse[pos.parse$CDR3.amino.acid.sequence == x,]
+  
+  num.rearrangements <- length(unique(df$CDR3.nucleotide.sequence))
+  return(num.rearrangements)
+})
+# Put info into a dataframe
+priv.rearrangement.df <- data.frame(CDR3 = priv.CDR3s,
+                                   num.rearrangements = unlist(priv.rearrangement.count))
+priv.rearrangement.df$set <- "private"
+
+# rbind the two dataframes for plotting
+rearrangement.count.df <- rbind(pub.rearrangement.df, priv.rearrangement.df)
+wilcox.test(num.rearrangements ~ set, data = rearrangement.count.df)
+
+# Plot as a density plot
+ggplot(rearrangement.count.df, aes(x = num.rearrangements, color = set)) + geom_density() +
+  scale_color_manual(values = c("blue", "red")) +
+  ggtitle("Number of rearrangements for each CDR3") +
+  xlab("number of each rearrangement") +
+  theme_bw()
+data_summary <- function(x) {
+   m <- mean(x)
+   ymin <- m-sd(x)
+   ymax <- m+sd(x)
+   return(c(y=m,ymin=ymin,ymax=ymax))
+}
+
+ggplot(rearrangement.count.df, aes(y = num.rearrangements, x = set, color = set)) + geom_violin() +
+  stat_summary(fun.data=data_summary) +
+  scale_color_manual(values = c("blue", "red")) +
+  ggtitle("Number of rearrangements for each CDR3") +
+  ylab("number of rearrangements") +
+  theme_bw()
+```
+
+```{r pub_people_distribution}
+pub_df <- enriched.CDR3.df[enriched.CDR3.df$CDR3.amino.acid.sequence %in% pub.CDR3s,]
+
+plot_df <- data.frame(cdr3 = pub.CDR3s, people = NA)
+for(seq in unique(pub_df$CDR3.amino.acid.sequence)){
+  n_people <- length(unique(enriched.CDR3.df$id[enriched.CDR3.df$CDR3.amino.acid.sequence == seq]))
+  plot_df$people[plot_df$cdr3 == seq] <- n_people
+}
+
+ggplot(plot_df, aes(x = people)) + geom_histogram(binwidth = 1) +
+  geom_bar(width = 0.75) +
+  xlab("People") + ylab("number of public psCDR3s") +
+  theme_bw(base_size = 15)
+```
+
+```{r pub_vs_priv_motifs}
+# Had to adjust a function for finding CDR3s with a continuous nmer, need to change in function script
+find_cont <- function(nmer, CDR3s){
+  # Iterate across the CDR3s looking for which ones have an nmer
+  seqs <- CDR3s[grepl(nmer, substr(CDR3s, 4, nchar(CDR3s) - 3))]
+  return(seqs)
+}
+
+# Make a dataframe of all top nmers
+top.cont.nmers <- do.call(rbind, top.nmers)
+top.disc.nmers <- rbind(top.disc.fourmers, top.disc.fivemers)
+
+pub.with.motif <- c()
+priv.with.motif <- c()
+for(i in top.cont.nmers$nmer){
+  seqs.pub <- find_cont(i, pub.CDR3s)
+  pub.with.motif <- c(pub.with.motif, seqs.pub)
+  
+  seqs.priv <- find_cont(i, priv.CDR3s)
+  priv.with.motif <- c(priv.with.motif, seqs.priv)
+}
+for(i in top.disc.nmers$nmer){
+  seqs.pub <- find_disc(i, pub.CDR3s)
+  pub.with.motif <- c(pub.with.motif, seqs.pub)
+  
+  seqs.priv <- find_disc(i, priv.CDR3s)
+  priv.with.motif <- c(priv.with.motif, seqs.priv)
+  
+}
+pub.with.motif <- unique(pub.with.motif)
+priv.with.motif <- unique(priv.with.motif)
+
+fisher.test(matrix(c(length(pub.with.motif), length(priv.with.motif),
+                  length(pub.CDR3s) - length(pub.with.motif), length(priv.CDR3s) - length(priv.with.motif)),
+                  nrow = 2))
+
+plot.df <- data.frame(cat = c("public", "private"),
+                      perc.motif = c(length(pub.with.motif) / length(pub.CDR3s) * 100,
+                                     length(priv.with.motif) / length(priv.CDR3s) * 100))
+
+ggplot(plot.df, aes(x = cat, y = perc.motif, fill = cat)) + geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_y_continuous(limits = c(0, 20)) +
+  xlab("") + ylab("percent of psCDR3s with a motif") +
+  ggtitle("psCDR3s with motifs") +
+  theme_bw(base_size = 20)
+
+```
+
+```{r pub_vs_priv_in_network}
+pairs.graph <- read.graph(paste(raw.file.path, "neals.thesis.data", "lev1.motif.graph.with.compartment.data.gml", sep = "/"),format = "gml")
+
+pairs.graph <- igraph::as_data_frame(pairs.graph, what = "both")
+
+
+# Look into the node degree of public nodes
+pub.nodes <- pairs.graph$vertices$name[pairs.graph$vertices$public == "yes"]
+priv.nodes <- pairs.graph$vertices$name[pairs.graph$vertices$public == "no"]
+
+pub.degree <- data.frame(CDR3 = pub.nodes, 
+                         degree = unlist(lapply(pub.nodes, function(x){
+                                          df <- pairs.graph$edges[pairs.graph$edges$from == x |
+                                                                    pairs.graph$edges$to == x,]
+                                          return(nrow(df))
+                                          })),
+                         set = "public")
+
+priv.degree = data.frame(CDR3 = priv.nodes, 
+                         degree = unlist(lapply(priv.nodes, function(x){
+                           df <- pairs.graph$edges[pairs.graph$edges$from == x |
+                                                     pairs.graph$edges$to == x,]
+                           return(nrow(df))
+                         })),
+                         set = "private")
+
+# Combine the data for plotting
+plot.df <- rbind(pub.degree, priv.degree)
+plot.df$set <- factor(plot.df$set, levels = c("private", "public"))
+
+ggplot(plot.df, aes(y = degree, x = set, fill = set)) + geom_boxplot() +
+  scale_y_continuous(limits = c(0, 29)) +
+  scale_fill_manual(values = c("blue", "red")) +
+  ggtitle("node degree distribution") +
+  ylab("node degree") +
+  theme_bw(base_size = 20)
+
+# Check statistical significance
+wilcox.test(degree ~ set, data = plot.df)
+
+```
+
+```{r pub_priv_in_graph}
+plot.df <- data.frame(set = c("private", "public"),
+                      perc_in_graph = c((length(priv.nodes) / length(priv.CDR3s) * 100),
+                                        (length(pub.nodes) / length(pub.CDR3s) * 100)))
+
+ggplot(plot.df, aes(x = set, y = perc_in_graph, fill = set)) + geom_bar(stat = "identity") +
+  scale_fill_manual(values = c("blue", "red")) +
+  scale_y_continuous(limits = c(0, 70)) +
+  ylab("percent of the group in the graph") +
+  ggtitle("percent of pub/priv psCDR3s in graph") +
+  theme_bw()
+
+```
+
+```{r Th subsets}
+# Get the list of files
+subset_files <- list.files(paste(raw.file.path, "adaptive_run_10_2020", sep = "/"))
+subset_files <- subset_files[!grepl("tet", subset_files)]
+
+# Parse the files
+subset_data <- parse.adaptive.file.list(paste(raw.file.path, "adaptive_run_10_2020", subset_files, sep = "/"))
+names(subset_data) <- paste("subj", names(subset_data), sep = "_")
+
+# Seperate the data into different subsets
+th1_data <- subset_data[grep("th1$", names(subset_data))]
+th2_data <- subset_data[grep("th2", names(subset_data))]
+th17_data <- subset_data[grep("th17", names(subset_data))]
+tfh_data <- subset_data[grep("tfh", names(subset_data))]
+
+# Limit each to just the enriched CDR3s
+th1_psCDR3 <- lapply(th1_data, function(x){
+  x[x$CDR3.amino.acid.sequence %in% enriched_cdr3_df$CDR3.amino.acid.sequence,]
+})
+
+th2_psCDR3 <- lapply(th2_data, function(x){
+  x[x$CDR3.amino.acid.sequence %in% enriched_cdr3_df$CDR3.amino.acid.sequence,]
+})
+
+th17_psCDR3 <- lapply(th17_data, function(x){
+  x[x$CDR3.amino.acid.sequence %in% enriched_cdr3_df$CDR3.amino.acid.sequence,]
+})
+
+tfh_psCDR3 <- lapply(tfh_data, function(x){
+  x[x$CDR3.amino.acid.sequence %in% enriched_cdr3_df$CDR3.amino.acid.sequence,]
+})
+
+unique_fun <- function(df) return(length(unique(df$CDR3.amino.acid.sequence)))
+count_fun <- function(df) return(sum(df$Read.count))
+
+pscdr3_stat_df <- data.frame("th1_psCDR3" = unlist(lapply(th1_psCDR3, unique_fun)),
+                             "th1_psCDR3_count" = unlist(lapply(th1_psCDR3, count_fun)),
+           "th2_psCDR3" = unlist(lapply(th2_psCDR3, unique_fun)),
+           "th2_psCDR3_count" = unlist(lapply(th2_psCDR3, count_fun)),
+           "th17_psCDR3" = unlist(lapply(th17_psCDR3, unique_fun)),
+           "th17_psCDR3_count" = unlist(lapply(th17_psCDR3, count_fun)),
+           "tfh_psCDR3" = unlist(lapply(tfh_psCDR3, unique_fun)),
+           "tfh_psCDR3_count" = unlist(lapply(tfh_psCDR3, count_fun)),
+           "tot_th1_CDR3" = unlist(lapply(th1_data, unique_fun)),
+           "tot_th1_count" = unlist(lapply(th1_data, count_fun)),
+           "tot_th2_CDR3" = unlist(lapply(th2_data, unique_fun )),
+           "tot_th2_count" = unlist(lapply(th2_data, count_fun)),
+           "tot_th17_CDR3" = unlist(lapply(th17_data, unique_fun)),
+           "tot_th17_count" = unlist(lapply(th17_data, count_fun)),
+           "tot_tfh_CDR3" = unlist(lapply(tfh_data, unique_fun)),
+           "tot_tfh_count" = unlist(lapply(tfh_data, count_fun)))
+pscdr3_stat_df$id <-  gsub(".*_(.+)_.*", "\\1", rownames(pscdr3_stat_df))
+
+# Add percents
+for (set in c("th1", "th2", "th17", "tfh")){
+  pscdr3_stat_df[[paste(set, "psCDR3_perc", sep = "_")]] <- pscdr3_stat_df[[paste(set, "psCDR3", sep = "_")]] /
+    pscdr3_stat_df[[paste("tot", set, "CDR3", sep = "_")]] * 100
+  
+  # Now percents of counts
+  pscdr3_stat_df[[paste(set, "psCDR3_count_perc", sep = "_")]] <- pscdr3_stat_df[[paste(set, "psCDR3_count", sep = "_")]] /
+    pscdr3_stat_df[[paste("tot", set, "count", sep = "_")]] * 100
+  
+}
+
+plot_df <- pscdr3_stat_df[grep("psCDR3_count_perc", colnames(pscdr3_stat_df), value = TRUE)]
+plot_df$id <- gsub(".*_(.+)_.*", "\\1", rownames(plot_df))
+plot_df <- reshape2::melt(plot_df, id.vars = "id")
+plot_df$variable <- gsub("_.*", "", plot_df$variable)
+
+ggplot(plot_df, aes(x = variable, y = value)) +
+  geom_boxplot() +
+  geom_jitter(position = position_jitter(0.1)) +
+  ylab("percent") +
+  ggtitle("percent of subset that is psCDR3") +
+  theme_bw(base_size = 20)
+
+```
+
+```{r subset_expansions}
+psCDR3s <- enriched_cdr3_df$CDR3.amino.acid.sequence
+
+subset_pscdr3 <- list()
+for(subj in unique(plot_df$id)){
+
+  sub_list <- list()
+  # Get the info for each subset  
+  for (subset in c("th1", "th2", "th17", "tfh")){
+    sub_dat <- subset_data[[paste("subj", subj, subset, sep = "_")]]
+    sub_dat$subset <- subset
+    sub_dat$id <- subj
+    sub_list[[subset]] <-sub_dat[sub_dat$CDR3.amino.acid.sequence %in% psCDR3s,]
+  }
+  subset_pscdr3[[subj]] <- sub_list
+  
+}
+
+
+comb_subset_pscdr3s <- do.call(rbind, do.call(rbind, subset_pscdr3))
+
+reg_info <- comb_subset_pscdr3s %>%
+  dplyr::select(CDR3.amino.acid.sequence, Read.count, Read.proportion, subset, id)
+reg_info$subset <- factor(reg_info$subset)
+design_mat <- model.matrix(~subset + 0, data = reg_info)
+
+reg_info <- cbind(reg_info, design_mat)
+
+
+count_percents <- reg_info %>%
+  group_by(subset, Read.count) %>%
+  mutate(n = n()) %>%
+  group_by(subset) %>%
+  mutate(count = n()) %>%
+  dplyr::select(subset, Read.count, n, count) %>%
+  distinct() %>%
+  mutate(perc = n / count)
+
+# count_percents$Read.count <- factor(count_percents$Read.count)
+groups <- c(0, 10, 50, 100, 500)
+
+
+grouped_percs <- lapply(unique(count_percents$subset), function(subs){
+  subs_dat <- count_percents %>%
+    dplyr::filter(subset == subs)
+  
+  perc_df <- lapply(seq_along(groups)[-length(groups)], function(indx){
+    perc <- subs_dat %>%
+      dplyr::filter(as.numeric(Read.count) > groups[indx] & as.numeric(Read.count) <= groups[indx + 1]) %>%
+      summarise(sum_perc = sum(perc)) %>%
+      mutate(group = indx)
+    return(perc)
+  }) %>%
+    do.call(rbind, .)
+  return(perc_df)
+}) %>%
+  do.call(rbind, .)
+
+cols = colorRampPalette(c("#ADDAE6", "#0000FF"))(n = length(groups))
+
+grouped_percs$group <- factor(grouped_percs$group)
+ggplot(grouped_percs, aes(x = subset, y = sum_perc, fill = group)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = cols, labels = c("1-10", "11-50", "51-100", ">100"), name = "Read count") +
+  xlab("") +
+  ylab("proportion of subset-psCDR3") +
+  ggtitle("Read counts of subset psCDR3s") +
+  theme_bw(base_size = 20)
+
+grouped_expaned <- grouped_percs[grouped_percs$group != 1,]
+
+cols = colorRampPalette(c("#ADDAE6", "#0000FF"))(n = length(groups) - 1)
+
+ggplot(grouped_expaned, aes(x = subset, y = sum_perc, fill = group)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = cols, labels = c("11-50", "51-100", ">100"), name = "Read count") +
+  xlab("") +
+  ylab("proportion of subset-psCDR3") +
+  ggtitle("Read counts of subset psCDR3s") +
+  theme_bw(base_size = 20)
+```
+
+```{r subset_jaccard}
+pub_pscdr3s <- unique(enriched_cdr3_df$CDR3.amino.acid.sequence[duplicated(enriched_cdr3_df$CDR3.amino.acid.sequence)])
+
+subset_pscdr3_by_subset <- lapply(list("th1", "th2", "th17", "tfh"), function(subset){
+  seqs <- lapply(subset_pscdr3, function(x) return(x[[subset]])) %>%
+    do.call(rbind, .)
+  seqs$pubpriv <- ifelse(seqs$CDR3.amino.acid.sequence %in% pub_pscdr3s, "public", "private")
+  return(seqs)
+})
+names(subset_pscdr3_by_subset) <- c("th1", "th2", "th17", "tfh")
+subsets <- c("th1", "th2", "th17", "tfh")
+col_fun = colorRamp2(c(0, 1), c("white", "#800080"))
+
+for (p in c("public", "private")){
+  heatmap_mtx <- matrix(nrow = 4, ncol = 4, dimnames = list(subsets, subsets))
+  # Get the pscdr3s for each subset
+  for (subset1 in c("th1", "th2", "th17", "tfh")){
+    for (subset2 in c("th1", "th2", "th17", "tfh")){
+      dat1 <- subset_pscdr3_by_subset[[subset1]]$CDR3.amino.acid.sequence[
+        subset_pscdr3_by_subset[[subset1]]$pubpriv == p]
+      dat2 <- subset_pscdr3_by_subset[[subset2]]$CDR3.amino.acid.sequence[
+        subset_pscdr3_by_subset[[subset2]]$pubpriv == p]
+      jac <- jaccard(dat1,
+                     dat2) 
+      heatmap_mtx[subset1, subset2] <- jac
+    }
+  }
+  print(
+  Heatmap(heatmap_mtx, cluster_rows = FALSE, cluster_columns = FALSE, col = col_fun,
+          column_title = paste(p, "ps-CDR3s", sep = " "),
+          heatmap_legend_param = list(title = paste("Jaccard index", p, sep = " ")),
+          column_names_gp = gpar(fontsize = 25), row_names_gp = gpar(fontsize = 25),
+          cell_fun = function(j, i, x, y, width, height, fill) {
+            grid.text(sprintf("%.2f", heatmap_mtx[i, j]), x, y, gp = gpar(fontsize = 20))
+          })
+  )
+}
+```
