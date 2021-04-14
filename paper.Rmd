@@ -11,6 +11,8 @@ This is a notebook for the examination of CDR3s in the repertoire of peanut alle
 Load in packages and the raw data
 ```{r}
 library(data.table)
+library(DescTools)
+library(tcR)
 library(ggplot2)
 library(gridExtra)
 library(magrittr)
@@ -21,6 +23,8 @@ library(scales)
 library(ComplexHeatmap)
 library(OmicsMarkeR)
 library(circlize)
+library(VennDiagram)
+
 
 switch(Sys.info()[['user']],
        nealp = {file.path <- "C:/Users/nealp/Documents/Dropbox (Partners HealthCare)/Manuscripts/neal_PNOIT_TCR"
@@ -28,6 +32,7 @@ switch(Sys.info()[['user']],
         stop("I don't recognize your username, type Sys.info() to find out what it is.")
 )
 source("neals_tcr_functions.R")
+source("tcR_functions.R")
 
 # Load in the raw data
 load(paste(raw.file.path, "neals.thesis.data", "parsed.data.baseline.rda", sep = "/"))
@@ -136,7 +141,7 @@ rest.CDR3s <- lapply(data.parse[grep("neg",names(data.parse))], function(x){
 neg.ham.df <- data.frame(distance = 0:20)
 neg.lev.df <- data.frame(distance = 0:20)
 
-for(i in 1:50){
+for(i in 1:5){
   sample <- sample(rest.CDR3s, nrow(enriched.CDR3.df))
   neg.ham <- CDR3_dist(sample, "hamming")
   neg.lev <- CDR3_dist(sample, "lv")
@@ -164,7 +169,7 @@ act.CDR3s <- lapply(data.parse[grep("pos",names(data.parse))], function(x){
 # Do the same for all CD154+
 pos.all.ham.df <- data.frame(distance = 0:20)
 pos.all.lev.df <- data.frame(distance = 0:20)
-for(i in 1:50){
+for(i in 1:5){
   sample = sample(act.CDR3s, nrow(enriched.CDR3.df))
   pos.all.ham <- CDR3_dist(sample, method = "hamming")
   pos.all.lev <- CDR3_dist(sample, method = "lv")
@@ -1098,4 +1103,136 @@ for (p in c("public", "private")){
           })
   )
 }
+```
+
+```{r tetramer_data}
+# Get the list of files
+tet_files <- paste(raw.file.path, "adaptive_run_10_2020",
+                   c("107_tet_apc.tsv", "107_tet_neg.tsv"), sep = "/")
+
+# Parse the files
+tet_data <- parse.adaptive.file.list(tet_files)
+
+for(name in names(tet_data)){
+  id <- sub("_.*", "", name)
+  tet <- sub(".*_", "", name)
+  tet_data[[name]]$id <- id
+  tet_data[[name]]$tet <- tet
+}
+
+# Run the ps-CDR3 enrichment stats on the tetramer data
+for (name in names(tet_data)){
+  if (grepl("neg", name)){
+    next()
+  }
+  subj <- strsplit(name, "_")[[1]][1]
+  # Get corresponding negative data
+  neg_data <- tet_data[[paste(subj, "tet_neg", sep = "_")]]
+  
+  # Get total read count
+  n_neg_total <- sum(neg_data$Read.count)
+  n_tet_total <- sum(tet_data[[name]]$Read.count)
+  
+  # iterate through sequences
+  tet_data[[name]]$g_stat <- sapply(tet_data[[name]]$CDR3.amino.acid.sequence, function(seq){
+    # Get reads in tet
+    n_tet <- sum(tet_data[[name]]$Read.count[tet_data[[name]]$CDR3.amino.acid.sequence == seq])
+
+    # Get negative info
+    n_neg <- sum(neg_data$Read.count[neg_data$CDR3.amino.acid.sequence == seq])
+    
+    # Perform a G-test
+    mtx <- matrix(c(n_tet, n_tet_total, n_neg, n_neg_total), ncol = 2)
+    gt <- GTest(mtx)
+    
+    
+    return(gt$statistic)
+  })
+  
+  tet_data[[name]]$g_p_val <- sapply(tet_data[[name]]$CDR3.amino.acid.sequence, function(seq){
+    # Get reads in tet
+    n_tet <- sum(tet_data[[name]]$Read.count[tet_data[[name]]$CDR3.amino.acid.sequence == seq])
+    
+    # Get negative info
+    n_neg <- sum(neg_data$Read.count[neg_data$CDR3.amino.acid.sequence == seq])
+    
+    # Perform a G-test
+    mtx <- matrix(c(n_tet, n_tet_total, n_neg, n_neg_total), ncol = 2)
+    gt <- GTest(mtx)
+    
+    return(gt$p.value)
+  })
+  tet_data[[name]]$g_q_val <- p.adjust(tet_data[[name]]$g_p_val, method = "BH")
+
+  
+  tet_data[[name]]$more_tet <- sapply(tet_data[[name]]$CDR3.amino.acid.sequence, function(seq){
+    # Get reads in tet
+    prop_tet <- sum(tet_data[[name]]$Read.proportion[tet_data[[name]]$CDR3.amino.acid.sequence == seq])
+    
+    # Get negative info
+    prop_neg <- sum(neg_data[[name]]$Read.proportion[neg_data$CDR3.amino.acid.sequence == seq])
+    
+    return(prop_tet > prop_neg)
+  })
+  
+}
+
+### Now lets get the corresponding ara h 1 ps-CDR3s from the same individual's CD154+ cells
+comp_files <- paste("C:/Users/nealp/Documents/Dropbox (Partners HealthCare)/Manuscripts/PAID-UP_paper/TCR Sequencing/Raw data GPE, Ara h 1, Ara h 2",
+                    c("107_BL_Arah1_CD154-.tsv", "107_BL_Arah1_CD154+.tsv"), sep = "/")
+
+comp_data <- parse.adaptive.file.list(comp_files)
+names(comp_data)[grep("CD154-", names(comp_data))] <- sub("CD154-", "neg", 
+                                                          names(comp_data)[grep("CD154-",
+                                                                            names(comp_data))])
+names(comp_data)[grep("CD154+", names(comp_data))] <- sub("CD154\\+", "pos",
+                                                          names(comp_data)[grep("CD154+",
+                                                                            names(comp_data))])
+
+comp_enriched <- CDR3.enriched(comp_data, pos.pattern = "_pos", neg.pattern = "_neg")
+
+# Okay now lets get our two files that we want to compare
+pscdr3_107 <- comp_enriched$`107_BL_Arah1`
+tet_apc <- tet_data$`107_tet_apc`
+
+# Lets make a column in the tetramer data to represent overlapping seqs
+tet_apc$enrich_category <- sapply(tet_apc$CDR3.amino.acid.sequence, function(sq){
+  if (sq %in% pscdr3_107$CDR3.amino.acid.sequence){
+    return("psCDR3")
+  } else {
+    return("none")
+  }
+})
+
+
+```
+
+```{r tet_venn}
+tet_apc_enrich <- tet_apc[tet_apc$g_q_val < 0.05 & tet_apc$Read.count > 1,]
+
+a1 <- length(unique(pscdr3_107$CDR3.amino.acid.sequence))
+a2 <- length(unique(tet_apc_enrich$CDR3.amino.acid.sequence))
+overlap <- length(intersect(unique(pscdr3_107$CDR3.amino.acid.sequence),
+                            unique(tet_apc_enrich$CDR3.amino.acid.sequence)))
+
+venn <- draw.pairwise.venn(a1, a2, overlap, category = c("Ara h 1 psCDR3",
+                                                         "Ara h 1 415-426 Tetramer"),
+                   fill = c("red", "blue"), cex = rep(5, 3), cat.pos = rep(360, 2),
+                   cat.cex = rep(2, 2))
+grid::grid.newpage()
+grid::grid.draw(venn)
+
+```
+
+```{r tet_overlap_counts}
+tet_apc_enrich$enrich_category <- factor(plot_df$enrich_category, levels = c("none", "psCDR3"))
+ggplot(tet_apc_enrich, aes(x = enrich_category, y = Read.count)) + geom_boxplot() +
+  scale_x_discrete(labels = c("non-psCDR3", "psCDR3")) +
+  scale_y_log10(limits = c(1, 3000)) +
+  annotation_logticks(sides = "l") +
+  xlab("") +
+  ylab("Tetramer+ Read count") +
+  ggtitle("Tetramer read counts of psCDR3s in tetramer sequences") +
+  theme_bw(base_size = 25) +
+  theme(axis.title=element_text(size=25,face="bold"))
 ```
